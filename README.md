@@ -1,4 +1,4 @@
-# Temporal Resonance Framework: Pillar-Based Contextual Alignment Scoring
+# ALIGN: Assessing Language Intent in Generative Neural Systems
 
 ### 🧠 A system for evaluating how well AI responses align with human input—across clarity, intent, tone, and emotional resonance.
 
@@ -50,7 +50,7 @@ pip install tensorflow tensorflow_hub numpy
 
 ### Run the Script
 ```bash
-python trf_pillars.py
+python align.py
 ```
 
 You’ll see printed scores for each conversational turn and an overall average. The system runs on a sample transcript by default, but you can easily pass in your own data.
@@ -69,9 +69,9 @@ This framework is ideal for:
 ## 📁 Structure
 
 ```
-/trf_pillars/
+/ALIGN/
 │
-├── trf_pillars.py         # Main scoring system with all evaluation functions
+├── align.py               # Main scoring system with all evaluation functions
 ├── README.md              # You are here
 └── requirements.txt       # Optional: dependency list
 ```
