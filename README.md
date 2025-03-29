@@ -4,7 +4,7 @@
 
 ---
 
-## 🌐 Live Demo *(optional if deployed)*
+## 🌐 Live Demo
 
 > Coming soon on [Streamlit Cloud](#) – Stay tuned.
 
