@@ -4,13 +4,13 @@
 
 ---
 
-## 🌐 Live Demo
+## Live Demo
 
 > Coming soon on [Streamlit Cloud](#) – Stay tuned.
 
 ---
 
-## ✨ Features
+## Features
 
 - **Six-Pillar Evaluation System**
   - Intent Matching
@@ -30,7 +30,7 @@
 
 ---
 
-## ⚙️ Installation
+## ⚙ Installation
 
 ```bash
 git clone https://github.com/mbayers6370/ALIGN-framework.git
@@ -42,15 +42,15 @@ streamlit run align.py
 
 ---
 
-🚀 Usage
+Usage
 	1.	Launch the Streamlit app:
-streamlit run align.py
+		streamlit run align.py
 	2.	Input a user message and a proposed AI response.
 	3.	Click “Evaluate Response” to view alignment scores and the final score.
 
 ---
 
-📊 Scoring Logic
+Scoring Logic
 
 Final Score is calculated as a simple average of six individual scores:
 	•	Each category is scored on a scale of 0–10
@@ -59,18 +59,18 @@ Final Score is calculated as a simple average of six individual scores:
 
 ⸻
 
-🧠 Vision
+Vision
 
 ALIGN aims to set a new standard for evaluating AI-generated dialogue—not just by fluency, but by empathy, relevance, and intent. It’s a first step toward emotionally intelligent AI evaluation.
 
 ⸻
 
-📄 License
+License
 
 MIT License. Free to use, remix, and build upon.
 
 ⸻
 
-🙌 Author
+Author
 
 Developed by Matthew Bayers
