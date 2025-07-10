@@ -74,3 +74,85 @@ MIT License. Free to use, remix, and build upon.
 Author
 
 Developed by Matthew Bayers
+
+# ALIGN Framework
+
+**ALIGN** is an AI alignment evaluation framework designed to assess how well an AI-generated response aligns with a user's intent, emotional tone, and contextual expectations. Built for single-turn interactions, ALIGN offers a structured breakdown across five core dimensions of conversational quality.
+
+---
+
+## Live Demo
+
+> Coming soon on [Streamlit Cloud](#) – Stay tuned.
+
+---
+
+## Features
+
+### Five-Pillar Evaluation System
+- **Intent Matching**
+- **Relevance**
+- **Clarity**
+- **Tone Match**
+- **Engagement**
+
+### Visual Score Breakdown
+- Streamlit-powered GUI with intuitive horizontal bar displays
+- Final score averaged and presented out of 10 (with decimal precision)
+
+### Lightweight & Modular
+- Single-file scoring logic for rapid iteration
+- Easy to integrate or extend into larger evaluation pipelines
+
+---
+
+## ⚙ Installation
+
+```bash
+git clone https://github.com/mbayers6370/ALIGN-framework.git
+cd ALIGN-framework
+python -m venv align-env
+source align-env/bin/activate  # On Windows: .\align-env\Scripts\activate
+pip install -r requirements.txt
+streamlit run align.py
+```
+
+---
+
+## Usage
+
+1. Launch the Streamlit app:
+    ```bash
+    streamlit run align.py
+    ```
+2. Input a user message and a proposed AI response.
+3. Click “Evaluate Response” to view detailed alignment scores and the final score.
+
+---
+
+## Scoring Logic
+
+The **final score** is a simple average of five individual scores:
+- Each dimension is scored from **0 to 10**
+- Final score is **rounded to the nearest tenth**
+- No category is weighted—it's honest, balanced evaluation
+
+---
+
+## Vision
+
+ALIGN is a step toward evaluating AI not just by grammar or coherence, but by **human-centered understanding**: how well a model responds with empathy, emotional alignment, and conversational momentum.
+
+We believe the future of AI evaluation is as much about **emotional resonance** as it is about factual relevance.
+
+---
+
+## License
+
+MIT License. Free to use, remix, and build upon.
+
+---
+
+## Author
+
+Developed by **Matthew Bayers**
