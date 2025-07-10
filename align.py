@@ -3,6 +3,27 @@ import streamlit as st
 import numpy as np
 import re
 from collections import Counter
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import torch
+import torch.nn.functional as F
+
+@st.cache_resource
+def load_embed_model():
+    return hub.load("https://tfhub.dev/google/universal-sentence-encoder/4")
+
+@st.cache_resource
+def load_emotion_model():
+    tokenizer = AutoTokenizer.from_pretrained("j-hartmann/emotion-english-distilroberta-base")
+    model = AutoModelForSequenceClassification.from_pretrained("j-hartmann/emotion-english-distilroberta-base")
+    return tokenizer, model
+
+def classify_emotion(text, tokenizer, model):
+    inputs = tokenizer(text, return_tensors="pt", truncation=True)
+    with torch.no_grad():
+        logits = model(**inputs).logits
+    probs = F.softmax(logits, dim=-1)
+    top_class = torch.argmax(probs, dim=1).item()
+    return model.config.id2label[top_class]
 
 st.set_page_config(page_title="ALIGN", layout="centered")
 #st.title("ALIGN - AI Response Evaluator")
@@ -10,51 +31,52 @@ st.set_page_config(page_title="ALIGN", layout="centered")
 
 #st.stop()  # Immediately halts the app so we can test UI load
 
+def cosine_similarity(vec1, vec2):
+    return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
+
 # Scoring Functions
-def score_intent_matching(user_input, ai_response, embed):
+def score_intent_matching(user_emb, ai_emb):
     """
     Evaluates whether the AI's response aligns with the intent of the user's input.
     Uses semantic similarity to determine alignment more robustly than punctuation alone.
     """
     # Basic heuristic: treat anything with a question mark or question keywords as a question
     question_keywords = ["who", "what", "when", "where", "why", "how", "do", "does", "can", "could", "should", "would", "is", "are"]
-    is_question = "?" in user_input or any(user_input.lower().strip().startswith(q) for q in question_keywords)
-
-    # Compute semantic similarity between input and response
-    embeddings = embed([user_input, ai_response])
-    similarity = np.inner(embeddings[0], embeddings[1])
+    # We cannot determine is_question from embeddings, so keep heuristic based on text outside this function
+    
+    similarity = cosine_similarity(user_emb, ai_emb)
 
     # Adjust score based on similarity and whether the AI answered the question
-    if is_question:
-        if similarity > 0.6:
-            return 10  # Strong alignment
-        elif similarity > 0.4:
-            return 7   # Partial alignment
-        else:
-            return 4   # Poor alignment
-    else:
-        # If it's not a question, we assume it's a statement or feeling
-        return 10 if similarity > 0.5 else 6
+    # Since is_question detection was based on text, we will move that outside or keep heuristic here
+    # For now, we will assume user_emb corresponds to a question if the original user_input had a question mark or question keywords
+    # But since we removed user_input from parameters, we cannot do that here
+    # So we will keep the heuristic outside and call this function only for similarity scoring
+    # To keep compatibility, we will assume similarity-based scoring only here
 
-def score_relevance(user_input, ai_response, embed):
+    # For backward compatibility, let's just use similarity to determine scores as before for non-question:
+    if similarity > 0.6:
+        return 10  # Strong alignment
+    elif similarity > 0.4:
+        return 7   # Partial alignment
+    else:
+        return 4   # Poor alignment
+
+def score_relevance(user_emb, ai_emb):
     """
     Scores relevance based on semantic similarity between user input and AI response.
-    Returns a score between 0 and 10.
+    Returns a score between 2 and 10.
     """
-    embeddings = embed([user_input, ai_response])
-    similarity = np.inner(embeddings[0], embeddings[1])
-    if similarity > 0.85:
+    similarity = cosine_similarity(user_emb, ai_emb)
+    if similarity > 0.75:
         return 10
-    elif similarity > 0.7:
+    elif similarity > 0.6:
         return 8
-    elif similarity > 0.55:
+    elif similarity > 0.45:
         return 6
-    elif similarity > 0.4:
+    elif similarity > 0.3:
         return 4
-    elif similarity > 0.25:
-        return 2
     else:
-        return 0
+        return 2
 
 def extract_weighted_keywords(text):
     """
@@ -76,30 +98,6 @@ def extract_weighted_keywords(text):
             keyword_weights[word] = 1  # Default weight
 
     return Counter(keyword_weights)
-
-def score_completeness(user_input, ai_response, embed):
-    """
-    Scores completeness based on whether the AI meaningfully addresses the user's concerns
-    and contains enough semantic and emotional content. Returns score from 0 to 10.
-    """
-    embeddings = embed([user_input, ai_response])
-    similarity = np.inner(embeddings[0], embeddings[1])  # baseline understanding
-
-    word_count = len(ai_response.split())
-    addresses_concern = similarity > 0.5 and word_count > 8
-
-    if similarity > 0.8 and word_count > 15:
-        return 10
-    elif similarity > 0.7 and word_count > 10:
-        return 8
-    elif addresses_concern:
-        return 6
-    elif similarity > 0.4:
-        return 4
-    elif word_count > 5:
-        return 2
-    else:
-        return 0
 
 def score_flow_and_continuity(previous_response, ai_response, embed):
     """
@@ -127,54 +125,57 @@ def score_clarity(ai_response):
     else:
         return 10  # Extended = likely more fully formed
 
-def score_adaptability(user_input, ai_response):
+def score_tone_match(user_input, ai_response, user_emb, ai_emb):
     """
-    Scores adaptability based on how well the AI matches the user's complexity and tone.
-    Uses word count ratio as a soft signal of mirroring or mismatch.
+    Scores tone alignment using emotion classification.
+    Compares emotional categories between user and AI response.
     """
-    user_len = len(user_input.split())
-    ai_len = len(ai_response.split())
+    tokenizer, model = load_emotion_model()
+    user_emotion = classify_emotion(user_input, tokenizer, model)
+    ai_emotion = classify_emotion(ai_response, tokenizer, model)
 
-    if user_len == 0:
-        return 5  # Neutral score if user gave nothing
-
-    ratio = ai_len / user_len
-
-    if 0.8 <= ratio <= 1.2:
-        return 10  # Perfectly matched tone and effort
-    elif 0.6 <= ratio < 0.8 or 1.2 < ratio <= 1.5:
-        return 8  # Close, slight mismatch
-    elif 0.4 <= ratio < 0.6 or 1.5 < ratio <= 2:
-        return 6  # Noticeable mismatch
+    if user_emotion == ai_emotion:
+        return 10
+    elif {user_emotion, ai_emotion} <= {"neutral", "joy", "love"}:
+        return 8
+    elif {"anger", "fear", "sadness"} & {user_emotion, ai_emotion}:
+        return 6 if user_emotion != ai_emotion else 10
     else:
-        return 4  # Poor adaptability
+        return 4  # Divergent or mismatched
 
-def score_engagement(ai_response):
+def score_engagement(user_emb, ai_emb):
     """
-    Scores engagement based on how interactive or open-ended the response is.
-    Uses question marks and response length as soft signals.
+    Scores engagement based on semantic continuation and conversational momentum.
+    Combines alignment (cosine similarity) and novelty (vector delta).
+    Rewards high momentum even at moderate similarity levels.
     """
-    word_count = len(ai_response.split())
-    has_question = "?" in ai_response
+    similarity = cosine_similarity(user_emb, ai_emb)
+    delta = np.linalg.norm(ai_emb - user_emb)
 
-    if has_question and word_count > 10:
-        return 10  # Invites a detailed follow-up
-    elif has_question:
-        return 8   # Invites some form of engagement
-    elif word_count > 10:
-        return 6   # Long but not engaging
-    elif word_count > 5:
-        return 5   # Neutral
+    print(f"[DEBUG] Engagement Similarity: {similarity:.4f}, Delta: {delta:.4f}")
+
+    if similarity > 0.85 and delta > 0.5:
+        return 10  # Aligned + forward
+    elif similarity > 0.7 and delta > 0.4:
+        return 8
+    elif similarity > 0.45 and delta > 0.9:
+        return 8  # NEW: Mid similarity but strong movement = high engagement
+    elif similarity > 0.55:
+        return 6
+    elif similarity > 0.35 and delta > 0.6:
+        return 5
+    elif similarity > 0.3:
+        return 4
     else:
-        return 3   # Disengaged
+        return 2
 
-def calculate_final_score(intent_score, relevance_score, completeness_score,
-                          clarity_score, adaptability_score, engagement_score):
+def calculate_final_score(intent_score, relevance_score,
+                          clarity_score, tone_match_score, engagement_score):
     """
-    Computes a simple average of the six alignment scores.
+    Computes a simple average of the five alignment scores.
     """
-    total = intent_score + relevance_score + completeness_score + clarity_score + adaptability_score + engagement_score
-    average = total / 6
+    total = intent_score + relevance_score + clarity_score + tone_match_score + engagement_score
+    average = total / 5
     return round(average, 1)
 
 # Streamlit Interface
@@ -185,19 +186,38 @@ ai_response = st.text_area("AI Response", placeholder="Enter the AI's response..
 
 if st.button("Evaluate Response"):
     with st.spinner("Loading model and evaluating..."):
-        embed = hub.load("https://tfhub.dev/google/universal-sentence-encoder/4")
+        embed = load_embed_model()
         if user_input and ai_response:
+            user_emb, ai_emb = embed([user_input, ai_response])
             # Score individual components
-            intent_score = score_intent_matching(user_input, ai_response, embed)
-            relevance_score = score_relevance(user_input, ai_response, embed)
-            completeness_score = score_completeness(user_input, ai_response, embed)
+            # Determine if user_input is a question for intent scoring heuristic
+            question_keywords = ["who", "what", "when", "where", "why", "how", "do", "does", "can", "could", "should", "would", "is", "are"]
+            is_question = "?" in user_input or any(user_input.lower().strip().startswith(q) for q in question_keywords)
+            similarity = cosine_similarity(user_emb, ai_emb)
+            # Intent logic (more generous thresholds)
+            if is_question:
+                if similarity > 0.7:
+                    intent_score = 10
+                elif similarity > 0.55:
+                    intent_score = 9
+                elif similarity > 0.45:
+                    intent_score = 7
+                elif similarity > 0.3:
+                    intent_score = 5
+                else:
+                    intent_score = 3
+            else:
+                intent_score = 10 if similarity > 0.55 else 7
+
+            relevance_score = score_relevance(user_emb, ai_emb)
+            # completeness_score = score_completeness(user_emb, ai_emb)
             # flow_score = score_flow_and_continuity(None, ai_response, embed)  # Assume no previous response for now
             clarity_score = score_clarity(ai_response)
-            adaptability_score = score_adaptability(user_input, ai_response)
-            engagement_score = score_engagement(ai_response)
+            tone_match_score = score_tone_match(user_input, ai_response, user_emb, ai_emb)
+            engagement_score = score_engagement(user_emb, ai_emb)
             final_score = calculate_final_score(
-                intent_score, relevance_score, completeness_score,
-                clarity_score, adaptability_score, engagement_score
+                intent_score, relevance_score,
+                clarity_score, tone_match_score, engagement_score
             )
 
             st.subheader("Score Breakdown")
@@ -208,10 +228,10 @@ if st.button("Evaluate Response"):
 
             draw_score("Intent", intent_score)
             draw_score("Relevance", relevance_score)
-            draw_score("Completeness", completeness_score)
+            # draw_score("Completeness", completeness_score)
             # draw_score("Flow", flow_score)  # flow score rendering
             draw_score("Clarity", clarity_score)
-            draw_score("Adaptability", adaptability_score)
+            draw_score("Tone Match", tone_match_score)
             draw_score("Engagement", engagement_score)
 
             st.markdown(f"### Final Score: {final_score}/10")
