@@ -1,4 +1,3 @@
-import tensorflow_hub as hub
 import streamlit as st
 import numpy as np
 import re
@@ -24,9 +23,36 @@ def load_intent_classifier():
         pass
     return model
 
-@st.cache_resource(show_spinner="Loading Universal Sentence Encoder…")
+
+@st.cache_resource(show_spinner="Loading embedding backend…")
 def load_embed_model():
-    return hub.load("https://tfhub.dev/google/universal-sentence-encoder/4")
+    """
+    Prefer TF-Hub USE if it's actually available (local dev),
+    otherwise fall back to Sentence-Transformers on CPU.
+    Returns: encode(List[str]) -> np.ndarray [N, D]
+    """
+    # Try TF-Hub only if present (not installed on Streamlit Cloud by default)
+    try:
+        import importlib
+        if importlib.util.find_spec("tensorflow_hub") is not None:
+            import tensorflow_hub as hub
+            use = hub.load("https://tfhub.dev/google/universal-sentence-encoder/4")
+            def encode(texts):
+                import numpy as np
+                return np.asarray(use(texts))
+            return encode
+    except Exception:
+        pass  # fall through to Sentence-Transformers fallback
+
+    # Fallback: small, fast, CPU-friendly sentence-transformer
+    from sentence_transformers import SentenceTransformer
+    st_model = SentenceTransformer("all-MiniLM-L6-v2")
+    def encode(texts):
+        import numpy as np
+        return np.asarray(
+            st_model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
+        )
+    return encode
 
 @st.cache_resource
 def load_emotion_model():
