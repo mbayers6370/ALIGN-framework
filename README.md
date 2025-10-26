@@ -67,7 +67,7 @@ To deploy it on **Streamlit Cloud**:
 The **final score** is a simple average of five individual scores:
 - Each dimension is scored from **0 to 10**
 - Final score is **rounded to the nearest tenth**
-- No category is weighted—it's honest, balanced evaluation
+- No category is weighted: it's honest, balanced evaluation
 
 ---
 
