@@ -60,6 +60,30 @@ def load_emotion_model():
     model = AutoModelForSequenceClassification.from_pretrained("j-hartmann/emotion-english-distilroberta-base")
     return tokenizer, model
 
+# === Zero-shot NLI model loader ===
+@st.cache_resource(show_spinner="Loading zero-shot NLI model…")
+def load_nli_model():
+    tokenizer = AutoTokenizer.from_pretrained("facebook/bart-large-mnli")
+    model = AutoModelForSequenceClassification.from_pretrained("facebook/bart-large-mnli")
+    return tokenizer, model
+
+# === Cross-encoder for relevance scoring ===
+@st.cache_resource(show_spinner="Loading cross-encoder for relevance…")
+def load_cross_encoder():
+    # Uses SentenceTransformers CrossEncoder trained on MS MARCO passage ranking
+    from sentence_transformers import CrossEncoder
+    try:
+        model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+    except Exception:
+        # Fallback to a slightly larger but compatible variant
+        model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-12-v2")
+    return model
+
+# Five-label zero-shot intent/response categories (no OTHER)
+ZERO_SHOT_LABELS = ["FACTOID", "HOW_TO", "PLANNING", "EMOTIONAL", "OPINION"]
+USER_HYP = "The user's message is a {} request."
+RESP_HYP = "The assistant's reply is written in a {} style."
+
 # ===== Intent taxonomy (keyword-free) =====
 INTENT_LABELS = ["FACTOID", "HOW_TO", "PLANNING", "EMOTIONAL", "OPINION", "OTHER"]
 
@@ -140,12 +164,12 @@ def _avg_encode_list(inst, prefix, lines):
 
 # Alignment matrix: rows=user intent, cols=response form → base score 0..10
 ALIGNMENT_MATRIX = {
-    "FACTOID":  {"FACTOID":10,"HOW_TO":7,"PLANNING":5,"EMOTIONAL":3,"OPINION":4,"OTHER":2},
-    "HOW_TO":   {"FACTOID":6,"HOW_TO":10,"PLANNING":8,"EMOTIONAL":4,"OPINION":5,"OTHER":3},
-    "PLANNING": {"FACTOID":5,"HOW_TO":8,"PLANNING":10,"EMOTIONAL":5,"OPINION":7,"OTHER":3},
-    "EMOTIONAL":{"FACTOID":3,"HOW_TO":5,"PLANNING":6,"EMOTIONAL":10,"OPINION":5,"OTHER":2},
-    "OPINION":  {"FACTOID":4,"HOW_TO":6,"PLANNING":8,"EMOTIONAL":5,"OPINION":10,"OTHER":3},
-    "OTHER":    {"FACTOID":3,"HOW_TO":4,"PLANNING":4,"EMOTIONAL":6,"OPINION":5,"OTHER":9},
+    "FACTOID":  {"FACTOID":10,"HOW_TO":8,"PLANNING":6,"EMOTIONAL":4,"OPINION":2,"OTHER":0},
+    "HOW_TO":   {"FACTOID":6,"HOW_TO":10,"PLANNING":8,"EMOTIONAL":2,"OPINION":4,"OTHER":0},
+    "PLANNING": {"FACTOID":2,"HOW_TO":8,"PLANNING":10,"EMOTIONAL":4,"OPINION":6,"OTHER":0},
+    "EMOTIONAL":{"FACTOID":2,"HOW_TO":4,"PLANNING":8,"EMOTIONAL":10,"OPINION":6,"OTHER":0},
+    "OPINION":  {"FACTOID":2,"HOW_TO":6,"PLANNING":8,"EMOTIONAL":4,"OPINION":10,"OTHER":0},
+    "OTHER":    {"FACTOID":0,"HOW_TO":4,"PLANNING":2,"EMOTIONAL":8,"OPINION":6,"OTHER":10},
 }
 
 @st.cache_resource
@@ -171,6 +195,126 @@ def _entropy(p):
 def _cos(a, b):
     a = np.array(a); b = np.array(b)
     return float(np.dot(a, b) / ((np.linalg.norm(a)+1e-9) * (np.linalg.norm(b)+1e-9)))
+
+# === Relevance keyword/entity coverage, refusal, and NLI helpers ===
+STOPWORDS = {"the","a","an","and","or","but","if","then","than","that","this","those","these","to","of","in","on","for","with","by","from","at","as","it","is","are","be","was","were","i","you","he","she","we","they","them","me","my","your","our","their"}
+
+def _simple_terms(text: str):
+    # crude content term extractor: alphanumerics >= 3 chars, stopword filtered, light stemming
+    toks = re.findall(r"[a-zA-Z][a-zA-Z0-9'-]{2,}", text.lower())
+    terms = []
+    for t in toks:
+        if t in STOPWORDS:
+            continue
+        # light stem/normalize endings
+        t2 = re.sub(r"(ing|ed|es|s)$", "", t)
+        if len(t2) >= 3 and t2 not in STOPWORDS:
+            terms.append(t2)
+    return terms
+
+def _keyword_coverage(user_text: str, resp_text: str) -> float:
+    ut = set(_simple_terms(user_text))
+    if not ut:
+        return 0.0
+    rt = set(_simple_terms(resp_text))
+    hit = len(ut & rt)
+    return hit / max(1, len(ut))
+
+def _detect_refusal(resp_text: str) -> bool:
+    t = resp_text.strip().lower()
+    patterns = [
+        r"\b(i\s+can't|i\s+cannot|i\s+won't|unable\s+to)\b",
+        r"\b(i\s+don't\s+know|not\s+sure)\b",
+        r"\b(as\s+an\s+ai|i\s+am\s+an\s+ai)\b",
+        r"\b(i\s+cannot\s+provide\s+that|no\s+answer)\b",
+    ]
+    return any(re.search(p, t) for p in patterns)
+
+def _nli_entails_contra(user_text: str, resp_text: str):
+    tokenizer, model = load_nli_model()
+    # Entailment: response entails user's request/statement
+    inputs = tokenizer(user_text, resp_text, return_tensors="pt", truncation=True)
+    with torch.no_grad():
+        logits = model(**inputs).logits[0]
+    probs = F.softmax(logits, dim=-1)
+    entail = float(probs[2].cpu().numpy())
+    contra = float(probs[0].cpu().numpy())
+    return entail, contra
+
+# === Zero-shot NLI + heuristics utilities ===
+def _nli_entailment_prob(premise: str, hypothesis: str, tokenizer, model) -> float:
+    """Return entailment probability P(entailment|premise,hypothesis) for MNLI models."""
+    inputs = tokenizer(premise, hypothesis, return_tensors="pt", truncation=True)
+    with torch.no_grad():
+        logits = model(**inputs).logits[0]
+    # BART/RoBERTa MNLI label order: [contradiction, neutral, entailment]
+    probs = F.softmax(logits, dim=-1)
+    return float(probs[2].cpu().numpy())
+
+def _heuristic_nudges(text: str, role: str):
+    """Small, conservative logit nudges based on obvious surface cues."""
+    t = text.lower().strip()
+    nudges = {k: 0.0 for k in ZERO_SHOT_LABELS}
+    # Question pattern: starts with interrogative and ends with '?'
+    if re.match(r"^(how|why|when|where|what|who|which)\b", t) and t.endswith("?"):
+        if t.startswith("how"):
+            nudges["HOW_TO"] += 0.25
+        else:
+            nudges["FACTOID"] += 0.20
+    # How-to cues
+    if re.search(r"\b(step|steps|guide|tutorial|walkthrough|how to)\b", t):
+        nudges["HOW_TO"] += 0.15
+    # Planning/decision cues
+    if re.search(r"\b(pros and cons|vs\.|versus|should i|recommend|plan|itinerary|roadmap|compare)\b", t):
+        nudges["PLANNING"] += 0.18
+    # Opinion cues
+    if re.search(r"\b(opinion|what do you think|your take|argue|debate)\b", t):
+        nudges["OPINION"] += 0.15
+    # Emotional cues
+    if re.search(r"\b(anxious|overwhelmed|sad|lonely|support|comfort|afraid|worried|depressed|hurt|grieving|angry|frustrated|panic)\b", t):
+        nudges["EMOTIONAL"] += 0.22
+    return nudges
+
+def _nli_label_scores(text: str, role: str):
+    """Compute per-label probabilities via MNLI entailment + heuristic logit nudges.
+    Returns: (label:str, margin:float, probs:np.ndarray)
+    """
+    tokenizer, model = load_nli_model()
+    hypothesis_tmpl = USER_HYP if role == "user" else RESP_HYP
+
+    # Collect raw entailment logits for each label to combine with nudges
+    raw_logits = []
+    for label in ZERO_SHOT_LABELS:
+        hyp = hypothesis_tmpl.format(label.replace("_", " ").lower())
+        inputs = tokenizer(text, hyp, return_tensors="pt", truncation=True)
+        with torch.no_grad():
+            out = model(**inputs).logits[0]
+        entail_logit = out[2].item()  # take entailment logit directly
+        raw_logits.append(entail_logit)
+
+    # Apply heuristic nudges in logit space (acts like a bias)
+    nudges = _heuristic_nudges(text, role)
+    logits = [raw_logits[i] + nudges[ZERO_SHOT_LABELS[i]] for i in range(len(ZERO_SHOT_LABELS))]
+
+    # Softmax over adjusted logits to get a normalized distribution
+    exps = np.exp(np.array(logits) - np.max(logits))
+    probs = exps / (exps.sum() + 1e-9)
+
+    idx = int(np.argmax(probs))
+    # Confidence as top1 - top2 margin (more stable than entropy for small K)
+    top2 = sorted(probs, reverse=True)[:2]
+    margin = float(top2[0] - top2[1]) if len(top2) == 2 else float(probs[idx])
+
+    label = ZERO_SHOT_LABELS[idx]
+    return label, margin, probs
+
+# Thin wrappers for clarity
+def classify_intent_user_zs(user_text: str):
+    return _nli_label_scores(user_text, role="user")  # (label, margin, probs)
+
+def classify_response_form_zs(ai_text: str):
+    label, margin, _ = _nli_label_scores(ai_text, role="assistant")
+    return label, margin
 
 
 # Emotion-aware gating helper for user text
@@ -222,37 +366,48 @@ def classify_response_form(ai_text):
 
 def score_intent_alignment(user_text, ai_text):
     """
-    Compute an intent alignment score 0..10 plus labels/confidence.
-    Uses: alignment matrix (discrete) + geometric modifiers (fit/coherence) + confidence.
+    Zero-shot NLI version (5 labels, no OTHER exposed).
+    - Classify user intent and response style via MNLI entailment with five labels.
+    - Use a small set of heuristics as logit biases.
+    - Score via a reduced alignment matrix blended with semantic coherence.
+    Returns: (score:float, user_label:str|"UNCERTAIN", resp_label:str, user_conf:float)
     """
-    user_label, user_conf, uvec = classify_intent_user(user_text)
-    resp_label, avec = classify_response_form(ai_text)
-    U, R = _intent_proto_vectors()
+    # Classify
+    user_label, user_margin, _ = _nli_label_scores(user_text, role="user")
+    resp_label, _ = classify_response_form_zs(ai_text)
 
-    # geometric modifiers
-    R_user = R[INTENT_LABELS.index(user_label)]
-    fit = _cos(avec, R_user)           # correct response form?
-    coh = _cos(avec, uvec)             # coherent with the user's task?
+    # Abstain threshold for uncertainty (hide OTHER; treat as UNCERTAIN)
+    UNCERTAIN_THRESH = 0.10
+    is_uncertain = user_margin < UNCERTAIN_THRESH
 
-    to01 = lambda x: 0.5*(x+1.0)
-    fit01, coh01 = to01(fit), to01(coh)
-    geom = 10.0 * (0.6*fit01 + 0.4*coh01)
+    # Coherence from general sentence embeddings (orthogonal to category)
+    embed = load_embed_model()
+    uvec, avec = embed([user_text, ai_text])
+    coh = _cos(uvec, avec)
+    to01 = lambda x: 0.5 * (x + 1.0)
+    coh01 = to01(coh)
 
-    base = ALIGNMENT_MATRIX[user_label][resp_label]  # 0..10
+    # Five-label alignment matrix (subset of your original, without OTHER)
+    ALIGN5 = {
+        "FACTOID":  {"FACTOID":10, "HOW_TO":8, "PLANNING":6, "EMOTIONAL":4, "OPINION":2},
+        "HOW_TO":   {"FACTOID":6,  "HOW_TO":10, "PLANNING":8, "EMOTIONAL":2, "OPINION":4},
+        "PLANNING": {"FACTOID":2,  "HOW_TO":8,  "PLANNING":10, "EMOTIONAL":4, "OPINION":6},
+        "EMOTIONAL":{"FACTOID":2,  "HOW_TO":4,  "PLANNING":8,  "EMOTIONAL":10, "OPINION":6},
+        "OPINION":  {"FACTOID":2,  "HOW_TO":6,  "PLANNING":8,  "EMOTIONAL":4,  "OPINION":10},
+    }
 
-    # confidence-aware blend
-    score = user_conf * (0.5*base + 0.5*geom) + (1.0 - user_conf) * (0.7*geom + 0.3*base)
-    if user_label != resp_label and user_conf > 0.4:
-        score *= 0.9  # small penalty for mismatched form at moderate+ confidence
-
-    # Optional cap for OTHER when only one side is OTHER
-    if user_label == "OTHER" and resp_label != "OTHER":
-        score = min(score, 6.0)
-    if resp_label == "OTHER" and user_label != "OTHER":
-        score = min(score, 6.0)
-
-    score = float(max(0.0, min(10.0, round(score, 1))))
-    return score, user_label, resp_label, float(round(user_conf, 3))
+    if is_uncertain:
+        # Neutral baseline when we abstain on user intent; blend with coherence
+        base = 6.0
+        score = 0.5 * base + 0.5 * (10.0 * coh01)
+        final = float(round(max(0.0, min(10.0, score)), 1))
+        return final, "UNCERTAIN", resp_label, float(round(user_margin, 3))
+    else:
+        base = ALIGN5[user_label][resp_label]
+        # Blend base with semantic coherence; weight by user-margin confidence
+        score = (0.8 * base + 0.2 * (10.0 * coh01)) * (0.7 + 0.3 * min(1.0, user_margin * 12.0))
+        final = float(round(max(0.0, min(10.0, score)), 1))
+        return final, user_label, resp_label, float(round(user_margin, 3))
 
 
 def classify_function(message, model, intent_labels):
@@ -323,28 +478,32 @@ def score_intent_matching(user_emb, ai_emb):
 
 def score_relevance(user_input, ai_response, user_emb, ai_emb):
     """
-    Scores relevance based on inferred content type similarity between user and AI response.
-    Uses INSTRUCTOR model to assess emergent category alignment.
+    Simple relevance: calibrated cross-encoder similarity (primary) + keyword coverage (secondary).
+    No NLI, no floors. Penalize explicit refusals.
     """
+    import math
+    ce = load_cross_encoder()
+    try:
+        ce_raw = float(ce.predict([(user_input, ai_response)])[0])
+    except Exception:
+        ce_raw = 0.0
 
-    # Embed for category type
-    instructor = load_intent_classifier()
-    inputs = [["Represent the content category of this text.", user_input],
-              ["Represent the content category of this text.", ai_response]]
-    category_embeddings = instructor.encode(inputs)
-    category_similarity = sk_cosine_similarity([category_embeddings[0]], [category_embeddings[1]])[0][0]
+    # Sigmoid calibration for CE logits → probability in [0,1]
+    ce_prob = 1.0 / (1.0 + math.exp(-ce_raw))
+    sem_score = 10.0 * ce_prob  # 0..10
 
-    # Now score based on similarity
-    if category_similarity > 0.8:
-        return 10
-    elif category_similarity > 0.65:
-        return 8
-    elif category_similarity > 0.5:
-        return 6
-    elif category_similarity > 0.35:
-        return 4
-    else:
-        return 2
+    # Simple keyword coverage (0..1) → 0..10
+    cov = _keyword_coverage(user_input, ai_response)
+    cov_score = 10.0 * cov
+
+    # Weighted blend (keep it straightforward)
+    relevance = 0.8 * sem_score + 0.2 * cov_score
+
+    # Corrective modifier for obvious refusals/deflections
+    if _detect_refusal(ai_response):
+        relevance *= 0.6
+
+    return float(round(max(0.0, min(10.0, relevance)), 1))
 
 def extract_weighted_keywords(text):
     """
