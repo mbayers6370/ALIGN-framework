@@ -1,6 +1,18 @@
 # ALIGN Framework
 
-**ALIGN** is an AI alignment evaluation framework designed to assess how well an AI-generated response aligns with a user's intent, emotional tone, and contextual expectations. Built for single-turn interactions, ALIGN offers a structured breakdown across five core dimensions of conversational quality.
+***Assessing Language Intent & Guidance Neutrality***
+
+ALIGN is an AI evaluation framework that measures how well an AI-generated response aligns with a user’s intent, tone, and contextual expectations.
+It doesn’t just check grammar or coherence, it evaluates understanding.
+
+Built for single-turn or multi-turn evaluation, ALIGN can analyze individual interactions entered manually, or process large-scale JSON datasets containing hundreds of user–AI exchanges. It dissects every conversation across five pillars of conversational quality, combining semantic similarity, zero-shot NLI reasoning, and emotion-aware modeling into one interpretable composite score.
+
+---
+
+## Why it Matters
+
+Modern AI models sound fluent but often miss the point. ALIGN bridges that gap by quantifying how human-centered a response feels, not just if it’s correct.
+It’s designed for teams building, tuning, or evaluating conversational agents that need to go beyond accuracy into alignment and empathy.
 
 ---
 
