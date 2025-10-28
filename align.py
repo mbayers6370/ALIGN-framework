@@ -220,6 +220,53 @@ def _keyword_coverage(user_text: str, resp_text: str) -> float:
     hit = len(ut & rt)
     return hit / max(1, len(ut))
 
+# === Engagement scoring helpers ===
+def _actionability_score(text: str) -> float:
+    T = text.lower()
+    # Lightweight action/next-step lexicon
+    kw = {
+        "do","try","use","install","run","click","choose","compare","decide","plan","schedule",
+        "set","create","draft","outline","step","steps","first","then","next","follow","check",
+        "measure","optimize","deploy","submit","review","consider","recommend","option","options"
+    }
+    hits = sum(1 for w in re.findall(r"[a-zA-Z]+", T) if w in kw)
+    # Map count to 0..1 with diminishing returns
+    return max(0.0, min(1.0, hits / 6.0))
+
+def _followup_question_score(text: str) -> float:
+    t = text.strip()
+    qcount = t.count("?")
+    if qcount == 0:
+        return 0.0
+    # Reward a single, targeted question (preferably near the end)
+    tail = t[-120:].count("?") if len(t) > 120 else qcount
+    if qcount == 1 and tail >= 1:
+        return 1.0
+    # Multiple questions → weaker (avoid surveys)
+    return 0.5
+
+def _structure_score(text: str) -> float:
+    t = text.lower()
+    # Lists, numbering, or step-like transitions
+    if re.search(r"(^|\n)\s*(\d+[\).]|[-•])\s+", text):
+        return 1.0
+    if re.search(r"\b(first|second|third|next|then|finally)\b", t):
+        return 0.7
+    if re.search(r"\b(pros\s*\/\s*cons|pros and cons|option\s+[ab]|option\s+\d+)\b", t):
+        return 0.6
+    return 0.0
+
+def _hard_stop_penalty(text: str) -> float:
+    t = text.lower()
+    patterns = [
+        r"\bhope that helps\b",
+        r"\bthat\'s all\b",
+        r"\bi can\'t help with that\b",
+        r"\bas an ai\b",
+        r"\bnot able to assist\b",
+    ]
+    return 0.2 if any(re.search(p, t) for p in patterns) else 0.0
+
 def _detect_refusal(resp_text: str) -> bool:
     t = resp_text.strip().lower()
     patterns = [
@@ -240,6 +287,95 @@ def _nli_entails_contra(user_text: str, resp_text: str):
     entail = float(probs[2].cpu().numpy())
     contra = float(probs[0].cpu().numpy())
     return entail, contra
+
+# === Engagement v2 (keyword-free, semantic/structural helpers) ===
+_s_split = re.compile(r"(?<=[.!?])\s+")
+
+def _sentences(text: str):
+    t = (text or "").strip()
+    if not t:
+        return []
+    # Simple sentence split; robust to single-sentence inputs
+    parts = _s_split.split(t)
+    return [p.strip() for p in parts if p.strip()]
+
+def _avg_max_pair_sim(user_text: str, ai_text: str, embed) -> float:
+    """For each user sentence, take max cosine to any reply sentence; average those maxima. Returns 0..1."""
+    usents = _sentences(user_text)
+    asents = _sentences(ai_text)
+    if not usents or not asents:
+        return 0.0
+    mats = embed(usents + asents)
+    U = mats[:len(usents)]
+    A = mats[len(usents):]
+    sims = []
+    for u in U:
+        # cosine on normalized vectors
+        row = np.dot(A, u)
+        sims.append(float(np.max(row)))
+    return float(max(0.0, min(1.0, np.mean(sims))))
+
+def _actionability_nli(ai_text: str) -> float:
+    """Zero-shot NLI entailment that the reply contains actionable next steps. Returns 0..1."""
+    tokenizer, model = load_nli_model()
+    hypothesis = "This text contains clear, actionable next steps."
+    inputs = tokenizer(ai_text, hypothesis, return_tensors="pt", truncation=True)
+    with torch.no_grad():
+        logits = model(**inputs).logits[0]
+    probs = F.softmax(logits, dim=-1)
+    entail_prob = float(probs[2].cpu().numpy())
+    return max(0.0, min(1.0, entail_prob))
+
+def _followup_focus(user_text: str, ai_text: str, embed) -> float:
+    """Reward a single, on-topic question. If multiple questions, downweight. Returns 0..1."""
+    sents = _sentences(ai_text)
+    q_sents = [s for s in sents if s.endswith('?')]
+    if not q_sents:
+        return 0.0
+    # On-topic similarity of question to user text
+    enc = embed([user_text] + q_sents)
+    u = enc[0]
+    qs = enc[1:]
+    sims = [float(np.dot(q, u)) for q in qs]
+    best = max(sims) if sims else 0.0
+    if len(q_sents) == 1:
+        return max(0.0, min(1.0, best))
+    # Multiple questions → discourage survey behavior
+    return max(0.0, min(1.0, 0.6 * best))
+
+# === New: Structural steps via numbering/bullets only (no word lexicons) ===
+def _struct_steps_score(text: str) -> float:
+    """Detect step-like structure via numbering/bullets only (no word lexicons). Returns 0..1."""
+    if not text or not text.strip():
+        return 0.0
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return 0.0
+    bullet_pat = re.compile(r"^(\d+\s*[\).]|[-•]\s+)")
+    hits = sum(1 for ln in lines if bullet_pat.search(ln))
+    # Also count inline enumerations like "1) ... 2) ... 3) ..." in a single line
+    inline_hits = len(re.findall(r"\b(\d+\s*[\).])\s+", text))
+    total = hits + max(0, inline_hits - hits)
+    # Map to 0..1 with diminishing returns (3+ items saturate)
+    if total <= 0:
+        return 0.0
+    return min(1.0, total / 3.0)
+
+def _novel_value(user_text: str, ai_text: str, embed) -> float:
+    """Encourage new-but-related content. Peak around mid similarity; penalize near-paraphrase and drift. Returns 0..1."""
+    enc = embed([user_text, ai_text])
+    sim = float(np.dot(enc[0], enc[1]))  # [-1,1]
+    # Map to 0..1 with a triangular band-pass shape
+    if sim <= 0.30:
+        return 0.0
+    if sim <= 0.55:
+        # 0.30..0.55 → 0..1
+        return (sim - 0.30) / 0.25
+    if sim <= 0.85:
+        # 0.55..0.85 → 1..0.2 (gently down)
+        return 1.0 - 0.8 * ((sim - 0.55) / 0.30)
+    # > 0.85 likely paraphrase; small residual credit
+    return 0.2
 
 # === Zero-shot NLI + heuristics utilities ===
 def _nli_entailment_prob(premise: str, hypothesis: str, tokenizer, model) -> float:
@@ -478,32 +614,32 @@ def score_intent_matching(user_emb, ai_emb):
 
 def score_relevance(user_input, ai_response, user_emb, ai_emb):
     """
-    Simple relevance: calibrated cross-encoder similarity (primary) + keyword coverage (secondary).
-    No NLI, no floors. Penalize explicit refusals.
+    Topicality-only relevance.
+    Primary: cosine similarity between user and response embeddings (0..10).
+    Secondary: keyword coverage as a light sanity term (0..10) with small weight.
+    No NLI, no cross-encoder, no refusal logic.
     """
-    import math
-    ce = load_cross_encoder()
-    try:
-        ce_raw = float(ce.predict([(user_input, ai_response)])[0])
-    except Exception:
-        ce_raw = 0.0
+    # Cosine similarity on normalized embeddings → [-1,1] → [0,10]
+    cos = float(np.dot(user_emb, ai_emb))  # embeddings are normalized in load_embed_model
+    cos01 = 0.5 * (cos + 1.0)              # map to 0..1
+    sem_score = 10.0 * cos01               # 0..10
 
-    # Sigmoid calibration for CE logits → probability in [0,1]
-    ce_prob = 1.0 / (1.0 + math.exp(-ce_raw))
-    sem_score = 10.0 * ce_prob  # 0..10
-
-    # Simple keyword coverage (0..1) → 0..10
+    # Keyword coverage sanity (0..1 → 0..10)
     cov = _keyword_coverage(user_input, ai_response)
     cov_score = 10.0 * cov
 
-    # Weighted blend (keep it straightforward)
-    relevance = 0.8 * sem_score + 0.2 * cov_score
+    # Blend with strong emphasis on semantic topicality
+    topicality = 0.9 * sem_score + 0.1 * cov_score
 
-    # Corrective modifier for obvious refusals/deflections
-    if _detect_refusal(ai_response):
-        relevance *= 0.6
+    # Guard: if there is almost no term overlap but high cosine, cap a bit
+    if cov < 0.1 and sem_score > 7.0:
+        topicality = min(topicality, 7.0)
 
-    return float(round(max(0.0, min(10.0, relevance)), 1))
+    # Guard: ultra-short user inputs can look spuriously close; keep conservative
+    if len(_simple_terms(user_input)) < 3:
+        topicality = min(topicality, 7.0)
+
+    return float(round(max(0.0, min(10.0, topicality)), 1))
 
 def extract_weighted_keywords(text):
     """
@@ -554,47 +690,97 @@ def score_clarity(ai_response):
 
 def score_tone_match(user_input, ai_response, user_emb, ai_emb):
     """
-    Scores tone alignment using emotion classification.
-    Compares emotional categories between user and AI response.
+    Tone-only matching (surface alignment):
+    Compares punctuation/energy, capitalization emphasis, verbosity, and simple sentiment cues.
+    No empathy rewards and no semantic checks.
     """
-    tokenizer, model = load_emotion_model()
-    user_emotion = classify_emotion(user_input, tokenizer, model)
-    ai_emotion = classify_emotion(ai_response, tokenizer, model)
+    import re
 
-    if user_emotion == ai_emotion:
-        return 10
-    elif {user_emotion, ai_emotion} <= {"neutral", "joy", "love"}:
-        return 8
-    elif {"anger", "fear", "sadness"} & {user_emotion, ai_emotion}:
-        return 6 if user_emotion != ai_emotion else 10
-    else:
-        return 4  # Divergent or mismatched
+    def tone_features(text: str):
+        t = text.strip()
+        words = t.split()
+        # Simple sentiment cue list (tiny, on purpose)
+        sent_words = re.findall(r"\b(great|awesome|amazing|beautiful|nice|good|sad|terrible|bad|awful|angry|mad)\b", t.lower())
+        return {
+            "exclaim": t.count("!"),
+            "question": t.count("?"),
+            "caps": sum(1 for w in words if len(w) >= 2 and w.isupper()),
+            "length": len(words),
+            "sent": len(sent_words),
+        }
 
-def score_engagement(user_emb, ai_emb):
+    def diff_ratio(u: dict, a: dict, key: str, tol: float = 1.0) -> float:
+        """Similarity 0..1 for a given scalar feature, tolerant to small differences."""
+        num = abs(u[key] - a[key])
+        den = (u[key] + a[key] + tol)
+        return max(0.0, 1.0 - (num / den))
+
+    u = tone_features(user_input)
+    a = tone_features(ai_response)
+
+    # Feature-wise similarities (0..1)
+    ex = diff_ratio(u, a, "exclaim", tol=1.0)    # excitement level
+    qs = diff_ratio(u, a, "question", tol=1.0)   # inquisitiveness
+    cp = diff_ratio(u, a, "caps", tol=1.0)       # emphasis / shouting
+    ln = diff_ratio(u, a, "length", tol=3.0)     # verbosity fit
+    st = diff_ratio(u, a, "sent", tol=1.0)       # simple sentiment cue alignment
+
+    # Blend into a tone score out of 10 (weights sum to 1.0)
+    tone_score = 10.0 * (0.35 * ex + 0.25 * qs + 0.20 * ln + 0.20 * st)
+
+    return float(round(min(10.0, max(0.0, tone_score)), 1))
+
+def score_engagement(user_input, ai_response, relevance_score=None, user_intent_label=None):
     """
-    Scores engagement based on semantic continuation and conversational momentum.
-    Combines alignment (cosine similarity) and novelty (vector delta).
-    Rewards high momentum even at moderate similarity levels.
+    Engagement (reward-based): semantic baseline + structural/interactive boosters.
+    No keywords; semantic/structural only.
+
+    Components (0..1):
+      - spec: semantic anchoring to user's sentences (avg max cosine)
+      - steps: structural steps via numbering/bullets (no lexicon)
+      - follow: exactly one on-topic question (embeddings), multiple downweighted
+      - novel: new-but-related content (band-pass)
+      - act: NLI actionability (small booster)
     """
-    similarity = cosine_similarity(user_emb, ai_emb)
-    delta = np.linalg.norm(ai_emb - user_emb)
+    embed = load_embed_model()
 
-    print(f"[DEBUG] Engagement Similarity: {similarity:.4f}, Delta: {delta:.4f}")
+    spec = _avg_max_pair_sim(user_input, ai_response, embed)     # 0..1
+    steps = _struct_steps_score(ai_response)                      # 0..1
+    follow = _followup_focus(user_input, ai_response, embed)      # 0..1
+    novel = _novel_value(user_input, ai_response, embed)          # 0..1
+    act   = _actionability_nli(ai_response)                       # 0..1
 
-    if similarity > 0.85 and delta > 0.5:
-        return 10  # Aligned + forward
-    elif similarity > 0.7 and delta > 0.4:
-        return 8
-    elif similarity > 0.45 and delta > 0.9:
-        return 8  # NEW: Mid similarity but strong movement = high engagement
-    elif similarity > 0.55:
-        return 6
-    elif similarity > 0.35 and delta > 0.6:
-        return 5
-    elif similarity > 0.3:
-        return 4
-    else:
-        return 2
+    # Baseline from semantics: 4..8 (spec 0..1 → 4..8)
+    score = 4.0 + 4.0 * spec
+
+    # Bonuses
+    score += 2.0 * steps                       # clear steps can add up to +2
+    score += 1.5 * min(1.0, follow)            # single, on-topic question boosts up to +1.5
+    score += 0.5 * min(1.0, max(0.0, novel))   # small lift for new-but-related
+    score += 1.0 * act                          # small lift for actionability semantics
+
+    # Soft specificity floors (ensure solid answers aren't unfairly low)
+    if spec >= 0.75:
+        score = max(score, 6.5)
+    elif spec >= 0.60:
+        score = max(score, 5.5)
+
+    # Cross-pillar caps/floors (light-touch)
+    if relevance_score is not None and relevance_score < 4.0:
+        score = min(score, 3.0)                 # off-topic cannot be engaging
+
+    if _detect_refusal(ai_response):
+        score = min(score, 2.0)                 # refusals are not engaging
+
+    # For HOW_TO requests lacking actionability, keep an upper bound unless steps are present
+    if (user_intent_label == "HOW_TO") and (act < 0.20) and (steps < 0.34):
+        score = min(score, 5.0)
+
+    # FACTOID with strong anchoring shouldn't be punished
+    if (user_intent_label == "FACTOID") and (spec >= 0.60):
+        score = max(score, 5.0)
+
+    return float(round(max(0.0, min(10.0, score)), 1))
 
 def calculate_final_score(intent_score, relevance_score,
                           clarity_score, tone_match_score, engagement_score):
@@ -623,7 +809,11 @@ if st.button("Evaluate Response"):
             # flow_score = score_flow_and_continuity(None, ai_response, embed)  # Assume no previous response for now
             clarity_score = score_clarity(ai_response)
             tone_match_score = score_tone_match(user_input, ai_response, user_emb, ai_emb)
-            engagement_score = score_engagement(user_emb, ai_emb)
+            engagement_score = score_engagement(
+                user_input, ai_response,
+                relevance_score=relevance_score,
+                user_intent_label=intent_user_label,
+            )
             final_score = calculate_final_score(
                 intent_score, relevance_score,
                 clarity_score, tone_match_score, engagement_score
@@ -670,7 +860,11 @@ if uploaded_file:
             relevance_score = score_relevance(user_input, ai_response, user_emb, ai_emb)
             clarity_score = score_clarity(ai_response)
             tone_match_score = score_tone_match(user_input, ai_response, user_emb, ai_emb)
-            engagement_score = score_engagement(user_emb, ai_emb)
+            engagement_score = score_engagement(
+                user_input, ai_response,
+                relevance_score=relevance_score,
+                user_intent_label=intent_user_label,
+            )
             final_score = calculate_final_score(intent_score, relevance_score, clarity_score, tone_match_score, engagement_score)
 
             scores.append({
