@@ -18,7 +18,12 @@ It’s designed for teams building, tuning, or evaluating conversational agents 
 
 ## Live Demo
 
-> The Streamlit app is currently in local development. Deployment on Streamlit Cloud coming soon.
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://align-framework.streamlit.app/)
+
+Try the full ALIGN Framework live here:  
+**https://align-framework.streamlit.app/**  
+
+*(First run may take a moment while models download.)*
 
 ---
 
