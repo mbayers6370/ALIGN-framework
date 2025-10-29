@@ -16,5 +16,5 @@ sentence-transformers==2.6.1
 InstructorEmbedding==1.0.1
 
 # PyTorch CPU wheel (works on Py3.12)
---extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.2.2+cpu
+--extra-index-url https://download.pytorch.org/whl/cpu
