@@ -1,19 +1,20 @@
-# --- Core app ---
+# Core
 streamlit==1.39.0
-pandas==2.1.4           # avoids sdist build on Streamlit Cloud, has manylinux wheels
+pandas==2.1.4
 numpy==1.26.4
 scikit-learn==1.4.2
 
-# --- HF / models ---
+# Transformers stack
 transformers==4.44.2
-tokenizers==0.15.2      # compatible with the above transformers on py311
+huggingface-hub==0.24.5
+tokenizers==0.15.2
 safetensors==0.4.3
 accelerate==0.33.0
 
-# Sentence embeddings
+# Embeddings
 sentence-transformers==2.6.1
 InstructorEmbedding==1.0.1
 
-# --- PyTorch CPU wheels (force official index) ---
--f https://download.pytorch.org/whl/cpu
+# PyTorch CPU wheel (works on Py3.12)
+--extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.2.2+cpu
