@@ -1,12 +1,19 @@
+# --- Core ---
 streamlit==1.39.0
 pandas==2.1.4
 numpy==1.26.4
 scikit-learn==1.4.2
+
+# --- HF / Transformers Stack (compatible pins) ---
 transformers==4.44.2
 huggingface-hub==0.24.5
-tokenizers==0.20.0
+tokenizers==0.19.1
 safetensors==0.4.3
+
+# --- Embeddings ---
 sentence-transformers==2.6.1
 InstructorEmbedding==1.0.1
+
+# --- PyTorch CPU (prebuilt wheels) ---
 torch==2.2.2+cpu
 --extra-index-url https://download.pytorch.org/whl/cpu
