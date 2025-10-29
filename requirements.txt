@@ -1,16 +1,19 @@
+# Core app
 streamlit==1.39.0
 pandas==2.2.2
 numpy==1.26.4
 scikit-learn==1.4.2
 
+# HF + transformers stack
 transformers==4.44.2
 huggingface-hub==0.24.5
 tokenizers==0.19.1
 safetensors==0.4.3
 accelerate==0.33.0
 
+# Embeddings / similarity
 sentence-transformers==2.7.0
 InstructorEmbedding==1.0.1
 
-# IMPORTANT: install torch from PyPI (no extra index); works on Python 3.11 CPU
+# PyTorch (CPU wheel from PyPI; compatible with Py 3.11 on Streamlit Cloud)
 torch==2.4.1
